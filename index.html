@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Stereo Nebula | Audio Gravity</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000; color:#fff; font-family: system-ui, sans-serif; }
+    #root { position:fixed; inset:0; }
+    canvas { display:block; }
+
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); z-index: 50; transition: opacity 0.8s ease;
+    }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+
+    .title { font-size: 24px; font-weight: 200; letter-spacing: 0.2em; margin-bottom: 10px; text-transform: uppercase; }
+    .subtitle { font-size: 11px; letter-spacing: 0.1em; color: #888; margin-bottom: 40px; }
+
+    button {
+      padding: 14px 40px; background: transparent; border: 1px solid rgba(255,255,255,0.3); color: #fff;
+      font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase; border-radius: 4px;
+      cursor: pointer; transition: all 0.3s;
+    }
+    button:hover { background: #fff; color: #000; box-shadow: 0 0 20px rgba(255,255,255,0.5); }
+
+    .hud {
+      position: fixed; bottom: 20px; left: 20px; font-size: 10px; letter-spacing: 0.15em;
+      color: rgba(255,255,255,0.5); text-transform: uppercase; pointer-events: none;
+      line-height: 1.6;
+    }
+
+    .bands {
+      position: fixed; top: 20px; left: 20px; z-index: 20;
+      font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: rgba(255,255,255,0.35);
+      background: rgba(0,0,0,0.22);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 10px 12px;
+      backdrop-filter: blur(10px);
+      pointer-events: none;
+      line-height: 1.9;
+      min-width: 210px;
+    }
+    .bandsRow { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .bandsBar { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; color: rgba(255,255,255,0.45); }
+
+    .stereo-meters {
+      position: fixed; bottom: 20px; right: 20px; display: flex; gap: 20px; pointer-events: none;
+      z-index: 20;
+    }
+    .meter-col { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+    .meter-label { font-size: 9px; letter-spacing: 2px; color: #777; }
+    .bar { width: 4px; height: 60px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; position: relative; }
+    .fill { position: absolute; bottom: 0; left: 0; width: 100%; height: 0%; background: #fff; transition: height 0.05s; }
+    .fill.left { background: #00f0ff; box-shadow: 0 0 10px #00f0ff; }
+    .fill.right { background: #ff0055; box-shadow: 0 0 10px #ff0055; }
+  </style>
+</head>
+<body>
+
+  <div id="root"></div>
+
+  <div id="overlay">
+    <div class="title">Stereo Nebula</div>
+    <div class="subtitle">Band Wells · Sound Floor · Subtle Stereo Bias</div>
+    <button id="startBtn">Enable Audio</button>
+  </div>
+
+  <div class="bands">
+    <div class="bandsRow"><span>Sub</span><span class="bandsBar" id="bSub">░░░░░░░░░░░░░░</span></div>
+    <div class="bandsRow"><span>Bass</span><span class="bandsBar" id="bBass">░░░░░░░░░░░░░░</span></div>
+    <div class="bandsRow"><span>Mid</span><span class="bandsBar" id="bMid">░░░░░░░░░░░░░░</span></div>
+    <div class="bandsRow"><span>High</span><span class="bandsBar" id="bHigh">░░░░░░░░░░░░░░</span></div>
+  </div>
+
+  <div class="hud">
+    Drag to orbit · Scroll to zoom<br><br>
+    Particles: 50,000
+  </div>
+
+  <div class="stereo-meters">
+    <div class="meter-col">
+      <div class="bar"><div class="fill left" id="meterL"></div></div>
+      <div class="meter-label">L</div>
+    </div>
+    <div class="meter-col">
+      <div class="bar"><div class="fill right" id="meterR"></div></div>
+      <div class="meter-label">R</div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+    import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+    import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+
+    // --- CONFIG ---
+    const NUM_PARTICLES = 50000;
+    const BOUNDS = 400;
+
+    /* 🟩 START HINZUFÜGEN: Band/Floor/Wells Settings (Konzept wie vorher) */
+    const FLOOR = {
+      fftSize: 1024,
+      cols: 64,
+      rows: 80,
+      width: 16,
+      depth: 11,
+      maxHeight: 2.4,
+      smoothing: 0.82
+    };
+
+    const WELLS = [
+      { key: "sub",  hue: 0.06, phase: 0.00 },
+      { key: "bass", hue: 0.10, phase: 1.57 },
+      { key: "mid",  hue: 0.54, phase: 3.14 },
+      { key: "high", hue: 0.62, phase: 4.71 }
+    ];
+    /* 🟩 ENDE HINZUFÜGEN */
+
+    // --- THREE.JS SETUP ---
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000000, 0.001);
+
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 2500);
+    camera.position.set(0, 150, 400);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+    renderer.setSize(innerWidth, innerHeight);
+
+    /* 🟨 START AUSTAUSCHEN: etwas höhere PixelRatio (schärfer), wie gewünscht
+       VORHER (auskommentiert):
+       renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    */
+    renderer.setPixelRatio(Math.min(2.5, window.devicePixelRatio || 1));
+    /* 🟨 ENDE AUSTAUSCHEN */
+
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.getElementById("root").appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.04;
+    controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
+
+    // --- POST PROCESSING (BLOOM) ---
+    const renderScene = new RenderPass(scene, camera);
+
+    /* 🟨 START AUSTAUSCHEN: Bloom etwas cleaner (weniger „milchig“, Partikel definierter)
+       VORHER (auskommentiert):
+       const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.8, 0.5, 0.1);
+    */
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.55, 0.55, 0.08);
+    /* 🟨 ENDE AUSTAUSCHEN */
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(renderScene);
+    composer.addPass(bloomPass);
+
+    // --- PROCEDURAL PARTICLE TEXTURE ---
+    function createCircleTexture() {
+      const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, 'rgba(255,255,255,1)');
+      gradient.addColorStop(0.18, 'rgba(255,255,255,0.85)');
+      gradient.addColorStop(0.55, 'rgba(255,255,255,0.16)');
+      gradient.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = gradient; ctx.fillRect(0, 0, 64, 64);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    // --- PARTICLE SYSTEM ---
+    const pGeometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(NUM_PARTICLES * 3);
+    const velocities = new Float32Array(NUM_PARTICLES * 3);
+    const colors = new Float32Array(NUM_PARTICLES * 3);
+    const bases = new Float32Array(NUM_PARTICLES);
+
+    const colorLeft = new THREE.Color(0x00f0ff);
+    const colorRight = new THREE.Color(0xff0055);
+
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      const radius = Math.random() * BOUNDS;
+      const theta = Math.random() * Math.PI * 2;
+      const yStr = (Math.random() - 0.5) * (BOUNDS * 0.1);
+
+      positions[i*3]   = Math.cos(theta) * radius;
+      positions[i*3+1] = yStr;
+      positions[i*3+2] = Math.sin(theta) * radius;
+
+      colors[i*3] = 0.6; colors[i*3+1] = 0.6; colors[i*3+2] = 0.6;
+      bases[i] = Math.random();
+    }
+
+    pGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    pGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+      size: 1.7,
+      map: createCircleTexture(),
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.86,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+
+    const particles = new THREE.Points(pGeometry, material);
+    scene.add(particles);
+
+    /* 🟩 START HINZUFÜGEN: Sound Floor (wie in unserem Konzept) */
+    const floorGeom = new THREE.PlaneGeometry(
+      FLOOR.width,
+      FLOOR.depth,
+      FLOOR.cols - 1,
+      FLOOR.rows - 1
+    );
+    floorGeom.rotateX(-Math.PI / 2);
+
+    const floorColors = new Float32Array(FLOOR.cols * FLOOR.rows * 3);
+    floorGeom.setAttribute("color", new THREE.BufferAttribute(floorColors, 3));
+
+    const floorWire = new THREE.Mesh(floorGeom, new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.55,
+      toneMapped: false
+    }));
+
+    const floorSolid = new THREE.Mesh(floorGeom, new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.05,
+      side: THREE.DoubleSide,
+      toneMapped: false
+    }));
+
+    const floorGroup = new THREE.Group();
+    floorGroup.add(floorSolid);
+    floorGroup.add(floorWire);
+    floorGroup.position.set(0, -190, -140);
+    floorGroup.scale.set(34, 1, 34);
+    scene.add(floorGroup);
+
+    const floorHistory = Array.from({ length: FLOOR.rows }, () => new Float32Array(FLOOR.cols));
+    const tmpColor = new THREE.Color();
+
+    function freqToColor(nFreq, amp, hueShift = 0) {
+      const hue = (0.05 + nFreq * 0.56 + hueShift) % 1;
+      const sat = 0.70 + amp * 0.25;
+      const lum = 0.06 + amp * 0.62;
+      tmpColor.setHSL(hue, sat, lum);
+      return tmpColor;
+    }
+    /* 🟩 ENDE HINZUFÜGEN */
+
+    /* 🟩 START HINZUFÜGEN: Band Wells Visual (4 kleine Anker) */
+    const wellPos = new Float32Array(WELLS.length * 3);
+    const wellCol = new Float32Array(WELLS.length * 3);
+    const wellGeom = new THREE.BufferGeometry();
+    wellGeom.setAttribute("position", new THREE.BufferAttribute(wellPos, 3));
+    wellGeom.setAttribute("color", new THREE.BufferAttribute(wellCol, 3));
+
+    const wellMat = new THREE.PointsMaterial({
+      size: 18,
+      map: material.map,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.30,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false
+    });
+
+    const wellPoints = new THREE.Points(wellGeom, wellMat);
+    scene.add(wellPoints);
+
+    function updateWells(time, bands, pan) {
+      const ringBase = 300;
+      const yAmpBase = 55;
+      const cx = pan * 60; // Stereo nur als Bias, nicht als Konzept
+
+      for (let i=0;i<WELLS.length;i++){
+        const w = WELLS[i];
+        const a = Math.max(0, Math.min(1, bands[w.key] || 0));
+        const ang = time * (0.20 + a * 0.12) + w.phase;
+        const ring = ringBase * (0.80 + a * 0.55);
+
+        const x = cx + Math.cos(ang) * ring;
+        const z = Math.sin(ang) * ring;
+        const y = Math.sin(time * 0.33 + w.phase) * (yAmpBase * (0.18 + a));
+
+        wellPos[i*3]   = x;
+        wellPos[i*3+1] = y;
+        wellPos[i*3+2] = z;
+
+        tmpColor.setHSL(w.hue, 0.92, 0.55 + a * 0.20);
+        wellCol[i*3]   = tmpColor.r;
+        wellCol[i*3+1] = tmpColor.g;
+        wellCol[i*3+2] = tmpColor.b;
+      }
+
+      wellGeom.attributes.position.needsUpdate = true;
+      wellGeom.attributes.color.needsUpdate = true;
+
+      wellMat.size = 16 + (bands.bass * 16) + (bands.sub * 10);
+      wellMat.opacity = 0.22 + bands.mid * 0.10 + bands.high * 0.10;
+    }
+    /* 🟩 ENDE HINZUFÜGEN */
+
+    // --- AUDIO SETUP (STEREO SPLIT) ---
+    let audioCtx, analyserL, analyserR, dataL, dataR;
+    let audioRunning = false;
+
+    /* 🟨 START AUSTAUSCHEN: Stereo behalten, aber zusätzlich Combined Bands (Sub/Bass/Mid/High) fürs Hauptkonzept
+       VORHER (auskommentiert):
+       let bandsL = { sub: 0, mid: 0, high: 0 }, bandsR = { sub: 0, mid: 0, high: 0 };
+    */
+    let bandsL = { sub: 0, bass: 0, mid: 0, high: 0 };
+    let bandsR = { sub: 0, bass: 0, mid: 0, high: 0 };
+    let bands =  { sub: 0, bass: 0, mid: 0, high: 0 }; // combined -> Hauptsteuerung
+    /* 🟨 ENDE AUSTAUSCHEN */
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        const splitter = audioCtx.createChannelSplitter(2);
+
+        analyserL = audioCtx.createAnalyser(); analyserL.fftSize = 512; analyserL.smoothingTimeConstant = 0.85;
+        analyserR = audioCtx.createAnalyser(); analyserR.fftSize = 512; analyserR.smoothingTimeConstant = 0.85;
+
+        source.connect(splitter);
+        splitter.connect(analyserL, 0);
+        splitter.connect(analyserR, 1);
+
+        dataL = new Uint8Array(analyserL.frequencyBinCount);
+        dataR = new Uint8Array(analyserR.frequencyBinCount);
+
+        audioRunning = true;
+        document.getElementById('overlay').classList.add('hidden');
+      } catch (err) {
+        alert('Mikrofonzugriff benötigt!\n' + err.message);
+      }
+    });
+
+    /* 🟨 START AUSTAUSCHEN: Bands neu (4-Band statt 3-Band), passend zur Idee „wie vorher“
+       VORHER (auskommentiert):
+       function getBands(data) {
+         const avg = (start, end) => {
+           let sum = 0; for (let i = start; i < end; i++) sum += data[i];
+           return (sum / (end - start)) / 255;
+         };
+         return { sub: avg(1, 4), mid: avg(10, 40), high: avg(80, 160) };
+       }
+    */
+    function getBands4(data) {
+      const avg = (start, end) => {
+        const s = Math.max(0, start);
+        const e = Math.min(data.length, end);
+        if (e <= s) return 0;
+        let sum = 0;
+        for (let i = s; i < e; i++) sum += data[i];
+        return (sum / (e - s)) / 255;
+      };
+      return {
+        sub:  avg(1, 5),
+        bass: avg(5, 14),
+        mid:  avg(14, 70),
+        high: avg(70, 170)
+      };
+    }
+    /* 🟨 ENDE AUSTAUSCHEN */
+
+    function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+    function mix(a,b,t){ return a + (b-a)*t; }
+
+    function makeBar(v, w=14){
+      const n = Math.round(clamp01(v) * w);
+      return "█".repeat(n) + "░".repeat(w - n);
+    }
+
+    // --- PHYSICS & ANIMATION LOOP ---
+    const clock = new THREE.Clock();
+
+    // Stereo attractors exist, but are demoted (Bias only)
+    const attLx = -150, attLy = 0, attLz = 0;
+    const attRx =  150, attRy = 0, attRz = 0;
+
+    // scratch
+    const combined = new Uint8Array(256);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = Math.min(clock.getDelta(), 0.05);
+      const time = clock.getElapsedTime();
+
+      // ─────────────────────────────────────────────
+      // AUDIO UPDATE
+      // ─────────────────────────────────────────────
+      if (audioRunning) {
+        analyserL.getByteFrequencyData(dataL);
+        analyserR.getByteFrequencyData(dataR);
+
+        bandsL = getBands4(dataL);
+        bandsR = getBands4(dataR);
+
+        // combined spectrum for floor + main concept
+        const len = Math.min(dataL.length, dataR.length, combined.length);
+        for (let i=0;i<len;i++) combined[i] = (dataL[i] + dataR[i]) >> 1;
+        bands = getBands4(combined);
+
+        // Stereo meters remain (sub)
+        document.getElementById('meterL').style.height = `${bandsL.sub * 100}%`;
+        document.getElementById('meterR').style.height = `${bandsR.sub * 100}%`;
+
+        // 4-band UI (Hauptkonzept)
+        document.getElementById('bSub').textContent  = makeBar(bands.sub);
+        document.getElementById('bBass').textContent = makeBar(bands.bass);
+        document.getElementById('bMid').textContent  = makeBar(bands.mid);
+        document.getElementById('bHigh').textContent = makeBar(bands.high);
+      } else {
+        // idle visuals
+        document.getElementById('bSub').textContent  = makeBar(0);
+        document.getElementById('bBass').textContent = makeBar(0);
+        document.getElementById('bMid').textContent  = makeBar(0);
+        document.getElementById('bHigh').textContent = makeBar(0);
+      }
+
+      // ─────────────────────────────────────────────
+      // SUBTLE STEREO BIAS (not the main concept)
+      // ─────────────────────────────────────────────
+      const pan = clamp01(0.5 + (bandsR.sub - bandsL.sub) * 0.9) * 2 - 1; // -1..1
+
+      // ─────────────────────────────────────────────
+      // SOUND FLOOR UPDATE (lightweight)
+      // ─────────────────────────────────────────────
+      /* 🟩 START HINZUFÜGEN: Floor Update mit Combined Spectrum */
+      const floorPos = floorGeom.attributes.position.array;
+      const floorCol = floorGeom.attributes.color.array;
+
+      if (audioRunning) {
+        for (let r = FLOOR.rows - 1; r > 0; r--) floorHistory[r].set(floorHistory[r - 1]);
+
+        const step = Math.max(1, Math.floor(combined.length / FLOOR.cols));
+        for (let c = 0; c < FLOOR.cols; c++) floorHistory[0][c] = (combined[c * step] || 0) / 255;
+
+        const hueShift = 0.02 * (bands.mid * 0.8 + bands.high * 1.2) + pan * 0.01;
+
+        for (let r = 0; r < FLOOR.rows; r++) {
+          const hIdx = (FLOOR.rows - 1) - r;
+          const age = 1 - (hIdx / (FLOOR.rows - 1)) * 0.68;
+
+          for (let c = 0; c < FLOOR.cols; c++) {
+            const vi = r * FLOOR.cols + c;
+            const amp = floorHistory[hIdx][c];
+            const nFreq = c / (FLOOR.cols - 1);
+
+            floorPos[vi * 3 + 1] = amp * FLOOR.maxHeight * age;
+
+            const col = freqToColor(nFreq, amp * age, hueShift);
+            floorCol[vi * 3]     = col.r;
+            floorCol[vi * 3 + 1] = col.g;
+            floorCol[vi * 3 + 2] = col.b;
+          }
+        }
+      } else {
+        // idle waves
+        for (let r = 0; r < FLOOR.rows; r++) {
+          const nz  = r / (FLOOR.rows - 1);
+          const age = 1 - nz * 0.5;
+
+          for (let c = 0; c < FLOOR.cols; c++) {
+            const vi = r * FLOOR.cols + c;
+            const nx = c / (FLOOR.cols - 1);
+
+            const wave = (Math.sin(nx * 5.0 + time * 0.6) * Math.cos(nz * 3.5 - time * 0.4) + 1) * 0.5;
+            const amp  = wave * 0.16 * age;
+
+            floorPos[vi * 3 + 1] = amp;
+
+            tmpColor.setHSL(0.58 + nx * 0.08, 0.55, 0.06 + amp * 2.8);
+            floorCol[vi * 3]     = tmpColor.r;
+            floorCol[vi * 3 + 1] = tmpColor.g;
+            floorCol[vi * 3 + 2] = tmpColor.b;
+          }
+        }
+      }
+
+      floorGeom.attributes.position.needsUpdate = true;
+      floorGeom.attributes.color.needsUpdate = true;
+      /* 🟩 ENDE HINZUFÜGEN */
+
+      // ─────────────────────────────────────────────
+      // UPDATE WELLS VIS
+      // ─────────────────────────────────────────────
+      updateWells(time, bands, pan);
+
+      // ─────────────────────────────────────────────
+      // PARTICLE PHYSICS (band-driven wells + subtle stereo bias)
+      // ─────────────────────────────────────────────
+      const pos = pGeometry.attributes.position.array;
+      const col = pGeometry.attributes.color.array;
+
+      // "wie vorher": Band gesteuert
+      const baseMass = 1200;
+      const massSub  = baseMass + bands.sub  * 13000;
+      const massBass = baseMass + bands.bass * 9000;
+      const massMid  = baseMass + bands.mid  * 6500;
+      const massHigh = baseMass + bands.high * 5200;
+
+      // Stereo exists but reduced
+      const stereoMix = 0.30;
+      const massL = (baseMass + bandsL.sub * 9000) * stereoMix;
+      const massR = (baseMass + bandsR.sub * 9000) * stereoMix;
+
+      // Swirl primarily from mid/bass
+      const swirl = 0.35 + bands.mid * 2.2 + bands.bass * 0.9;
+
+      // Highs -> micro turbulence
+      const noiseLevel = (bands.high * 0.9);
+
+      // Center pulse (sub) - makes breathing, not stereo-driven
+      const pulse = (0.0008 + bands.sub * 0.0024 + bands.bass * 0.0012);
+      const pulseSign = (Math.sin(time * (0.9 + bands.bass * 2.0)) * 0.5 + 0.5);
+      const centerK = pulse * pulseSign;
+
+      // size responds nicely
+      material.size = 1.55 + bands.bass * 1.35 + bands.sub * 0.75;
+
+      // softening
+      const soft = 520 + bands.high * 680;
+
+      // well positions
+      const wx0 = wellPos[0], wy0 = wellPos[1], wz0 = wellPos[2];
+      const wx1 = wellPos[3], wy1 = wellPos[4], wz1 = wellPos[5];
+      const wx2 = wellPos[6], wy2 = wellPos[7], wz2 = wellPos[8];
+      const wx3 = wellPos[9], wy3 = wellPos[10], wz3 = wellPos[11];
+
+      for (let i = 0; i < NUM_PARTICLES; i++) {
+        const i3 = i * 3;
+
+        let x = pos[i3], y = pos[i3+1], z = pos[i3+2];
+        let vx = velocities[i3], vy = velocities[i3+1], vz = velocities[i3+2];
+
+        // center pulse (sub/bass)
+        vx -= x * centerK * delta;
+        vy -= y * centerK * delta;
+        vz -= z * centerK * delta;
+
+        // ---- Stereo attractors (bias only) ----
+        {
+          const dxL = attLx - x, dyL = attLy - y, dzL = attLz - z;
+          const d2L = dxL*dxL + dyL*dyL + dzL*dzL + soft;
+          const fL = (massL / d2L);
+
+          const invL = 1 / Math.sqrt(d2L);
+          const nxL = dxL * invL, nyL = dyL * invL, nzL = dzL * invL;
+
+          const dxR = attRx - x, dyR = attRy - y, dzR = attRz - z;
+          const d2R = dxR*dxR + dyR*dyR + dzR*dzR + soft;
+          const fR = (massR / d2R);
+
+          const invR = 1 / Math.sqrt(d2R);
+          const nxR = dxR * invR, nyR = dyR * invR, nzR = dzR * invR;
+
+          // mild stereo pull
+          vx += (nxL * fL + nxR * fR) * delta;
+          vy += (nyL * fL + nyR * fR) * delta;
+          vz += (nzL * fL + nzR * fR) * delta;
+        }
+
+        // ---- Band wells (main concept) ----
+        // helper inline for each well: apply attraction + swirl around Y
+        function applyWell(wx, wy, wz, m, swirlK){
+          const dx = wx - x, dy = wy - y, dz = wz - z;
+          const d2 = dx*dx + dy*dy + dz*dz + soft;
+          const inv = 1 / Math.sqrt(d2);
+          const nx = dx * inv, ny = dy * inv, nz = dz * inv;
+
+          const f = (m / d2);
+
+          // attraction
+          vx += nx * f * delta;
+          vy += ny * f * delta;
+          vz += nz * f * delta;
+
+          // swirl (dir × up) = (-nz, 0, nx)
+          vx += (-nz) * (swirlK * f) * delta;
+          vz += ( nx) * (swirlK * f) * delta;
+
+          return f;
+        }
+
+        const f0 = applyWell(wx0, wy0, wz0, massSub,  swirl * 0.55);
+        const f1 = applyWell(wx1, wy1, wz1, massBass, swirl * 0.80);
+        const f2 = applyWell(wx2, wy2, wz2, massMid,  swirl * 0.65);
+        const f3 = applyWell(wx3, wy3, wz3, massHigh, swirl * 0.45);
+
+        // High turbulence
+        if (noiseLevel > 0.05) {
+          const n = noiseLevel * 1.6 * delta;
+          vx += (Math.random() - 0.5) * n;
+          vy += (Math.random() - 0.5) * n;
+          vz += (Math.random() - 0.5) * n;
+        }
+
+        // Damping (keeps it readable)
+        const damp = 0.965;
+        vx *= damp; vy *= damp; vz *= damp;
+
+        // Integrate
+        x += vx;
+        y += vy;
+        z += vz;
+
+        // Soft containment
+        const rr = x*x + y*y + z*z;
+        const lim = (BOUNDS * 1.55);
+        if (rr > lim*lim){
+          const r = Math.sqrt(rr) || 1;
+          const k = 0.012 * (r - lim);
+          vx -= (x / r) * k;
+          vy -= (y / r) * k;
+          vz -= (z / r) * k;
+          x += vx * 0.35;
+          y += vy * 0.35;
+          z += vz * 0.35;
+        }
+
+        // writeback
+        pos[i3] = x; pos[i3+1] = y; pos[i3+2] = z;
+        velocities[i3] = vx; velocities[i3+1] = vy; velocities[i3+2] = vz;
+
+        // ─────────────────────────────────────────────
+        // COLOR: band-ish + tiny stereo tint (not dominant)
+        // ─────────────────────────────────────────────
+        const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
+        const glow = Math.min(speed * 0.18, 1.0);
+
+        // base hue from speed (blue -> warm)
+        const t = Math.max(0, Math.min(1, speed * 0.06));
+        const baseHue = 0.60 - t * 0.55; // ~blue to orange
+        tmpColor.setHSL((baseHue + (bands.high * 0.10)) % 1, 0.95, 0.55 + glow * 0.25);
+
+        // stereo bias: very light
+        const stereoBias = clamp01(0.5 + pan * 0.35);
+        const sr = mix(colorLeft.r, colorRight.r, 1 - stereoBias);
+        const sg = mix(colorLeft.g, colorRight.g, 1 - stereoBias);
+        const sb = mix(colorLeft.b, colorRight.b, 1 - stereoBias);
+
+        const mixStereo = 0.18; // <- not main
+        col[i3]   += ((tmpColor.r * (1 - mixStereo) + sr * mixStereo) - col[i3]) * 0.12;
+        col[i3+1] += ((tmpColor.g * (1 - mixStereo) + sg * mixStereo) - col[i3+1]) * 0.12;
+        col[i3+2] += ((tmpColor.b * (1 - mixStereo) + sb * mixStereo) - col[i3+2]) * 0.12;
+
+        // extra sparkle from speed
+        col[i3]   += glow * 0.14;
+        col[i3+1] += glow * 0.14;
+        col[i3+2] += glow * 0.14;
+      }
+
+      pGeometry.attributes.position.needsUpdate = true;
+      pGeometry.attributes.color.needsUpdate = true;
+
+      controls.update();
+      composer.render();
+    }
+
+    window.addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(2.5, window.devicePixelRatio || 1));
+      composer.setSize(innerWidth, innerHeight);
+      bloomPass.setSize(innerWidth, innerHeight);
+    });
+
+    animate();
+  </script>
+</body>
+</html>
